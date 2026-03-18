@@ -1,0 +1,4 @@
+[
+  "function totalAssets() view returns (uint256)",
+  "function totalSupply() view returns (uint256)"
+]

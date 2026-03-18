@@ -1,0 +1,28 @@
+{
+  "name": "dune-work",
+  "version": "1.0.0",
+  "description": "This workspace is configured to connect to Dune's Model Context Protocol (MCP) server for blockchain data queries and analytics.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/scripts/index.ts",
+    "start": "node dist/index.js",
+    "test": "tsx src/scripts/index.ts",
+    "fetch-share-prices": "tsx src/scripts/fetch-share-prices.ts",
+    "upload-to-dune": "tsx src/scripts/upload-to-dune.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "ethereum-block-by-date": "^1.5.0",
+    "ethers": "^6.16.0"
+  }
+}
