@@ -1,8 +1,10 @@
 -- IB Vaults Raw Events
 -- Query ID: 6852397
--- Description: All ERC20 Transfer events (full history) for active vaults.
+-- Description: All ERC20 Transfer events (full history) for all active IB vaults.
+--              Covers Morpho v2 vaults and the AAVE USDS aToken.
+--              Downstream queries filter by vault_address to select their protocol.
 --
--- Active vaults:
+-- Morpho vaults:
 --   Morpho USDS Risk Capital (Skybase IB, Morpho v2)
 --     0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4
 --   Morpho USDS Flagship (Skybase IB, Morpho v2)
@@ -10,12 +12,15 @@
 --   USDS Vault (Spark, Morpho v1)
 --     0xe41a0583334f0dc4e023acd0bfef3667f6fe0597
 --
--- TODO - not yet tracked:
---   AAVE USDS (not Morpho)
---     0xdc035d45d973e3ec169d2276ddab16f1e407384f
---     NOTE: s/b 0x32a6268f9Ba3642Dda7892aDd74f1D34469A4259
---   stUSDS/USDS Pool (not Morpho)
+-- AAVE:
+--   AAVE USDS aToken
+--     0x32a6268f9ba3642dda7892add74f1d34469a4259
+--
+-- Curve:
+--   stUSDS/USDS Curve Stableswap-NG LP token
 --     0x2c7c98a3b1582d83c43987202aeff638312478ae
+--   coins(0): 0xdc035d45d973e3ec169d2276ddab16f1e407384f (USDS — the reward-bearing token)
+--   coins(1): 0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9 (stUSDS)
 
 WITH
 
@@ -34,7 +39,9 @@ raw_transfers AS (
     WHERE contract_address IN (
         0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4,  -- Morpho USDS Risk Capital (Morpho v2)
         0xe15fcc81118895b67b6647bbd393182df44e11e0,  -- Morpho USDS Flagship     (Morpho v2)
-        0xe41a0583334f0dc4e023acd0bfef3667f6fe0597   -- USDS Vault               (Spark, Morpho v1)
+        0xe41a0583334f0dc4e023acd0bfef3667f6fe0597,  -- USDS Vault               (Spark, Morpho v1)
+        0x32a6268f9ba3642dda7892add74f1d34469a4259,  -- AAVE USDS aToken
+        0x2c7c98a3b1582d83c43987202aeff638312478ae   -- Curve stUSDS/USDS LP token
     )
     AND topic0 = 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
 ),

@@ -4,9 +4,13 @@ Analytics workspace for Morpho v2 IB Vaults on Ethereum. Tracks vault share pric
 
 ## Tracked Vaults
 
+**Morpho:**
 - **Morpho USDS Risk Capital** (Skybase IB): `0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4`
 - **Morpho USDS Flagship** (Skybase IB): `0xe15fcc81118895b67b6647bbd393182df44e11e0`
 - **USDS Vault** (Spark, Morpho v1): `0xe41a0583334f0dc4e023acd0bfef3667f6fe0597`
+
+**AAVE:**
+- **AAVE USDS aToken**: `0x32a6268f9ba3642dda7892add74f1d34469a4259`
 
 ## Setup
 
@@ -65,9 +69,9 @@ FROM dune.your_username.ib_vaults_share_prices
 ### Core Data Queries
 
 **`ib-vaults-raw.sql`** (Query ID: 6852397)
-- Extracts all ERC20 Transfer events from the three vaults
-- Classifies as: `deposit` (mint), `withdraw` (burn), or `transfer`
-- Used by rewards calculation
+- Extracts all ERC20 Transfer events from all tracked vaults (Morpho + AAVE)
+- Classifies as: `deposit` (mint from zero), `withdraw` (burn to zero), or `transfer`
+- Shared data source for both rewards queries
 
 **`ib-vaults-ssr.sql`** (Query ID: 6853959)
 - Historical SSR (Sky Savings Rate) from SPBEAM contract
@@ -79,34 +83,38 @@ FROM dune.your_username.ib_vaults_share_prices
 - Requires running `fetch-share-prices` + `upload-to-dune` first
 - Used by rewards calculation
 
-### Rewards Calculation
+### Rewards Calculations
 
-**`ib-vaults-rewards.sql`** (Query ID: 6852356)
-- Calculates time-weighted USDS rewards per depositor
-- Uses data from all three core queries
-- Formula per segment:
-  ```
-  reward = (balance_shares / 1e18) × avg_share_price × idle_factor × apr × segment_seconds / seconds_per_year
-  ```
-- Configurable: vault address, period start/end blocks, idle_factor
+**`ib-vaults-rewards-morpho.sql`** (Query ID: 6852356)
+- Time-weighted USDS rewards per depositor for Morpho vaults
+- Formula: `(balance_shares / 1e18) × avg_share_price × idle_factor × apr × segment_seconds / seconds_per_year`
+- Requires `fetch-share-prices` + `upload-to-dune` to be run first
+- Parameters: `{{vault_address}}`, `{{from_timestamp}}`, `{{to_timestamp}}`
+
+**`ib-vaults-rewards-aave.sql`** (Query ID: 6860002)
+- Time-weighted USDS rewards per depositor for the AAVE USDS vault
+- Formula: `(balance_atokens / 1e18) × apr × segment_seconds / seconds_per_year`
+- No share price needed (1 aToken = 1 USDS); no idle_factor
+- Parameters: `{{from_timestamp}}`, `{{to_timestamp}}`
 
 **Dependencies:**
 ```
-ib-vaults-raw (6852397) ────┐
-                             ├──> ib-vaults-rewards (6852356)
-ib-vaults-share-price (6852700) ─┤
-                             │
-ib-vaults-ssr (6853959) ─────┘
+                                ib-vaults-share-price (6852700) ─┐
+                                                                  │
+ib-vaults-raw (6852397) ──────> ib-vaults-rewards-morpho (6852356) <─ ib-vaults-ssr (6853959)
+
+ib-vaults-raw (6852397) ──────> ib-vaults-rewards-aave (6860002)   <─ ib-vaults-ssr (6853959)
 ```
 
 ## Project Structure
 
 ```
-├── queries/                       # Dune SQL queries
-│   ├── ib-vaults-raw.sql         # Transfer events (Query: 6852397)
-│   ├── ib-vaults-ssr.sql         # SSR history (Query: 6853959)
-│   ├── ib-vaults-share-price.sql # Share prices (Query: 6852700)
-│   └── ib-vaults-rewards.sql     # Rewards calc (Query: 6852356)
+├── queries/                              # Dune SQL queries
+│   ├── ib-vaults-raw.sql                # Transfer events, Morpho + AAVE (Query: 6852397)
+│   ├── ib-vaults-ssr.sql                # SSR history from SPBEAM (Query: 6853959)
+│   ├── ib-vaults-share-price.sql        # Hourly share prices, Morpho only (Query: 6852700)
+│   ├── ib-vaults-rewards-morpho.sql     # Morpho rewards calc (Query: 6852356)
+│   └── ib-vaults-rewards-aave.sql       # AAVE rewards calc (Query: 6860002)
 ├── src/
 │   ├── scripts/
 │   │   ├── fetch-share-prices.ts # Fetch share prices via RPC
@@ -129,4 +137,6 @@ ib-vaults-ssr (6853959) ─────┘
 
 2. **Run queries on Dune**: Visit [dune.com](https://dune.com) and execute queries by ID, or use the Dune MCP via Cursor AI
 
-3. **Calculate rewards**: Run `ib-vaults-rewards.sql` with desired vault and period parameters
+3. **Calculate Morpho rewards**: Run `ib-vaults-rewards-morpho.sql` (Query: 6852356) with `{{vault_address}}`, `{{from_timestamp}}`, `{{to_timestamp}}`
+
+4. **Calculate AAVE rewards**: Run `ib-vaults-rewards-aave.sql` (Query: 6860002) with `{{from_timestamp}}`, `{{to_timestamp}}` — no share price step needed

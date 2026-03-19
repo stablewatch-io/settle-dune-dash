@@ -1,34 +1,32 @@
--- IB Vaults Rewards Calculation
--- Query ID: 6852356
--- Description: Time-weighted USDS reward per depositor for IB vaults.
---              Vault selectable via dropdown. Period defined by timestamp parameters.
+-- IB Vaults Rewards Calculation (AAVE)
+-- Query ID: 6860002
+-- Description: Time-weighted USDS reward per depositor for the AAVE USDS IB vault.
+--              1 aToken = 1 USDS, so no share price conversion is needed.
+--              No idle_factor applied — AAVE capital is treated as fully productive.
+--
+-- Vault (fixed):
+--   AAVE USDS aToken: 0x32a6268f9ba3642dda7892add74f1d34469a4259
 --
 -- Parameters:
---   {{vault_address}}   — Vault address (dropdown)
 --   {{from_timestamp}}  — Period start (e.g., '2026-03-10 16:00:00')
 --   {{to_timestamp}}    — Period end   (e.g., '2026-03-17 15:59:59')
 --
--- Vaults:
---   Morpho USDS Risk Capital (Skybase IB, Morpho v2): 0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4
---   Morpho USDS Flagship     (Skybase IB, Morpho v2): 0xe15fcc81118895b67b6647bbd393182df44e11e0
---   USDS Vault               (Spark, Morpho v1):      0xe41a0583334f0dc4e023acd0bfef3667f6fe0597
---
 -- reward = SUM over segments of:
---   (balance_shares / 1e18) * avg_share_price * idle_factor * apr * segment_seconds / seconds_per_year
+--   (balance_atokens / 1e18) * apr * segment_seconds / seconds_per_year
 --
 -- Reads from:
---   query_6852397  ib-vaults-raw         → Transfer events for all vaults
---   query_6852700  ib-vaults-share-price → Hourly totalAssets/totalSupply per vault
---   query_6853959  ib-vaults-ssr         → SSR history (basis points) from SPBEAM contract
---   ethereum.blocks                      → Block lookup by timestamp (for dynamic block resolution)
+--   query_6852397  ib-vaults-raw → Transfer events (includes AAVE aToken)
+--   query_6853959  ib-vaults-ssr → SSR history (basis points) from SPBEAM contract
+--   ethereum.blocks              → Block lookup by timestamp (for dynamic block resolution)
+--
 
 WITH
 
--- ─── Parameters (edit here to change vault/period) ────────────────────────────
+-- ─── Parameters (edit here to change period) ──────────────────────────────────
 params AS (
     SELECT
-        -- Vault — select from the dropdown above the query
-        {{vault_address}}                                             AS vault,
+        -- AAVE USDS aToken (fixed — only one AAVE vault tracked)
+        0x32a6268f9ba3642dda7892add74f1d34469a4259   AS vault,
         -- Period timestamps (main parameters to adjust)
         CAST('{{from_timestamp}}' AS TIMESTAMP)                       AS from_ts_param,
         CAST('{{to_timestamp}}' AS TIMESTAMP)                         AS to_ts_param,
@@ -50,25 +48,14 @@ params AS (
             ORDER BY time DESC
             LIMIT 1
         )                                                             AS to_block,
-        -- avg_share_price: (price_at_start + price_at_end) / 2, matching extract_events.py.
-        -- Sourced from ib-vaults-share-price (query_6852700); hours chosen to bracket the period.
-        (
-            SELECT AVG(share_price)
-            FROM query_6852700
-            WHERE vault_address = '{{vault_address}}'
-              AND hour IN (
-                  date_trunc('hour', CAST('{{from_timestamp}}' AS TIMESTAMP)),
-                  date_trunc('hour', CAST('{{to_timestamp}}' AS TIMESTAMP))
-              )
-        )                                                             AS avg_share_price,
-        -- Reward parameters
-        CAST(0.80 AS DOUBLE)                                          AS idle_factor,
+        -- No avg_share_price: 1 aToken = 1 USDS.
+        -- No idle_factor: AAVE is treated as fully productive (factor = 1).
         CAST(31557600.0 AS DOUBLE)                                    AS seconds_per_year, -- 365.25 * 24 * 3600
         '0x0000000000000000000000000000000000000000'                  AS zero_addr,
         '0x000000000000000000000000000000000000dead'                  AS dead_addr
 ),
 
--- ─── APR lookup (separate CTE to reference params.from_block) ─────────────────
+-- ─── APR lookup ───────────────────────────────────────────────────────────────
 -- APR sourced from SPBEAM Set(SSR) events via query_6853959 (ib-vaults-ssr).
 -- We take the SSR in effect at from_block and use it as a constant for the
 -- entire period. This is a simplification: if the SSR changed mid-period,
@@ -91,7 +78,7 @@ params_with_apr AS (
 ),
 
 -- ─── All Transfer events from ib-vaults-raw (query_6852397) ──────────────────
--- Filtered to this vault and up through period end.
+-- Filtered to the AAVE aToken and up through period end.
 all_transfers AS (
     SELECT
         block_number,
@@ -216,16 +203,14 @@ final_balances AS (
 ),
 
 -- ─── Reward per segment ───────────────────────────────────────────────────────
--- balance_after is in raw share units (1e18 scale); divide by 1e18 to get
--- human-readable shares, then multiply by avg_share_price to get USDS.
+-- balance_after is in raw aToken units (1e18 scale) ≈ USDS (1 aToken = 1 USDS).
+-- No share price multiplication or idle_factor.
 -- Result is in human-readable USDS so that reward_wei = SUM * 1e18.
 segments AS (
     SELECT
         r.address,
         r.balance_after,
         (r.balance_after / 1e18)
-            * p.avg_share_price
-            * p.idle_factor
             * p.apr
             * (COALESCE(r.next_event_ts, p.to_block_ts) - r.event_ts)
             / p.seconds_per_year                                      AS segment_reward_usds
@@ -255,7 +240,7 @@ SELECT
     CAST(SUM(s.segment_reward_usds) * 1e18 AS DECIMAL(38, 0))         AS reward_wei,
     COALESCE(pb.balance_shares, 0)                                    AS initial_balance_shares,
     fb.final_balance_shares,
-    fb.final_balance_shares * p.avg_share_price / 1e18                AS final_balance_usds,
+    fb.final_balance_shares / 1e18                                    AS final_balance_usds,
     COALESCE(st.total_deposited_shares, 0)                            AS total_deposited_shares,
     COALESCE(st.total_withdrawn_shares, 0)                            AS total_withdrawn_shares,
     COALESCE(st.deposit_count,  0)                                    AS deposit_count,
@@ -272,6 +257,5 @@ GROUP BY
     st.total_deposited_shares,
     st.total_withdrawn_shares,
     st.deposit_count,
-    st.withdraw_count,
-    p.avg_share_price
+    st.withdraw_count
 ORDER BY reward_usds DESC
