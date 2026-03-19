@@ -1,7 +1,12 @@
 -- IB Vaults Rewards Calculation
 -- Query ID: 6852356
 -- Description: Time-weighted USDS reward per depositor for IB vaults.
---              Vault selectable via dropdown. 1 week period. Reproduces calculate_rewards.py output.
+--              Vault selectable via dropdown. Period defined by timestamp parameters.
+--
+-- Parameters:
+--   {{vault_address}}   — Vault address (dropdown)
+--   {{from_timestamp}}  — Period start (e.g., '2026-03-10 16:00:00')
+--   {{to_timestamp}}    — Period end   (e.g., '2026-03-17 15:59:59')
 --
 -- Vaults:
 --   Morpho USDS Risk Capital (Skybase IB, Morpho v2): 0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4
@@ -12,9 +17,10 @@
 --   (balance_shares / 1e18) * avg_share_price * idle_factor * apr * segment_seconds / seconds_per_year
 --
 -- Reads from:
---   query_6852397  ib-vaults-raw        → Transfer events for all vaults
+--   query_6852397  ib-vaults-raw         → Transfer events for all vaults
 --   query_6852700  ib-vaults-share-price → Hourly totalAssets/totalSupply per vault
---   query_6853959  ib-vaults-ssr        → SSR history (basis points) from SPBEAM contract
+--   query_6853959  ib-vaults-ssr         → SSR history (basis points) from SPBEAM contract
+--   ethereum.blocks                      → Block lookup by timestamp (for dynamic block resolution)
 
 WITH
 
@@ -23,35 +29,65 @@ params AS (
     SELECT
         -- Vault — select from the dropdown above the query
         {{vault_address}}                                             AS vault,
-        -- Period
-        24628168                                                      AS from_block,
-        CAST(1773159011 AS DOUBLE)                                    AS from_block_ts,   -- 2026-03-10 16:00:59 UTC
-        24678301                                                      AS to_block,
-        CAST(1773763667 AS DOUBLE)                                    AS to_block_ts,     -- 2026-03-17 15:59:59 UTC
+        -- Period timestamps (main parameters to adjust)
+        CAST('{{from_timestamp}}' AS TIMESTAMP)                       AS from_ts_param,
+        CAST('{{to_timestamp}}' AS TIMESTAMP)                         AS to_ts_param,
+        -- Calculate unix timestamps
+        CAST(to_unixtime(CAST('{{from_timestamp}}' AS TIMESTAMP)) AS DOUBLE) AS from_block_ts,
+        CAST(to_unixtime(CAST('{{to_timestamp}}' AS TIMESTAMP)) AS DOUBLE)   AS to_block_ts,
+        -- Lookup blocks from timestamps
+        (
+            SELECT number
+            FROM ethereum.blocks
+            WHERE time >= CAST('{{from_timestamp}}' AS TIMESTAMP)
+            ORDER BY time ASC
+            LIMIT 1
+        )                                                             AS from_block,
+        (
+            SELECT number
+            FROM ethereum.blocks
+            WHERE time <= CAST('{{to_timestamp}}' AS TIMESTAMP)
+            ORDER BY time DESC
+            LIMIT 1
+        )                                                             AS to_block,
         -- avg_share_price: (price_at_start + price_at_end) / 2, matching extract_events.py.
         -- Sourced from ib-vaults-share-price (query_6852700); hours chosen to bracket the period.
         (
             SELECT AVG(share_price)
             FROM query_6852700
             WHERE vault_address = '{{vault_address}}'
-              AND hour IN (TIMESTAMP '2026-03-10 16:00:00', TIMESTAMP '2026-03-17 15:00:00')
+              AND hour IN (
+                  date_trunc('hour', CAST('{{from_timestamp}}' AS TIMESTAMP)),
+                  date_trunc('hour', CAST('{{to_timestamp}}' AS TIMESTAMP))
+              )
         )                                                             AS avg_share_price,
         -- Reward parameters
         CAST(0.80 AS DOUBLE)                                          AS idle_factor,
-        -- APR sourced from SPBEAM Set(SSR) events via query_6853959 (ib-vaults-ssr).
-        -- We take the SSR in effect at from_block and use it as a constant for the
-        -- entire period. This is a simplification: if the SSR changed mid-period,
-        -- a more accurate calculation would apply each rate only to its active window.
-        (
-            SELECT apr
-            FROM query_6853959
-            WHERE block_number <= 24628168
-            ORDER BY block_number DESC
-            LIMIT 1
-        )                                                             AS apr,
         CAST(31557600.0 AS DOUBLE)                                    AS seconds_per_year, -- 365.25 * 24 * 3600
         '0x0000000000000000000000000000000000000000'                  AS zero_addr,
         '0x000000000000000000000000000000000000dead'                  AS dead_addr
+),
+
+-- ─── APR lookup (separate CTE to reference params.from_block) ─────────────────
+-- APR sourced from SPBEAM Set(SSR) events via query_6853959 (ib-vaults-ssr).
+-- We take the SSR in effect at from_block and use it as a constant for the
+-- entire period. This is a simplification: if the SSR changed mid-period,
+-- a more accurate calculation would apply each rate only to its active window.
+ssr_with_rank AS (
+    SELECT
+        block_number,
+        apr,
+        ROW_NUMBER() OVER (ORDER BY block_number DESC) AS rn
+    FROM query_6853959
+    CROSS JOIN params
+    WHERE block_number <= params.from_block
+),
+
+params_with_apr AS (
+    SELECT
+        p.*,
+        (SELECT apr FROM ssr_with_rank WHERE rn = 1)                  AS apr
+    FROM params p
 ),
 
 -- ─── All Transfer events from ib-vaults-raw (query_6852397) ──────────────────
@@ -65,7 +101,7 @@ all_transfers AS (
         from_address                                                  AS from_addr,
         to_address                                                    AS to_addr
     FROM query_6852397
-    CROSS JOIN params
+    CROSS JOIN params_with_apr params
     WHERE vault_address = params.vault
       AND block_number  <= params.to_block
 ),
@@ -73,13 +109,13 @@ all_transfers AS (
 -- ─── Pre-period balance per address ──────────────────────────────────────────
 pre_period_deltas AS (
     SELECT to_addr AS address, shares AS delta
-    FROM all_transfers CROSS JOIN params
+    FROM all_transfers CROSS JOIN params_with_apr params
     WHERE block_number < params.from_block
 
     UNION ALL
 
     SELECT from_addr AS address, -shares AS delta
-    FROM all_transfers CROSS JOIN params
+    FROM all_transfers CROSS JOIN params_with_apr params
     WHERE block_number < params.from_block
       AND from_addr != params.zero_addr
 ),
@@ -100,10 +136,10 @@ in_period_deltas AS (
         block_number,
         log_index,
         CASE
-            WHEN from_addr = (SELECT zero_addr FROM params) THEN 'deposit'
+            WHEN from_addr = (SELECT zero_addr FROM params_with_apr) THEN 'deposit'
             ELSE 'transfer_in'
         END                                                           AS event_type
-    FROM all_transfers CROSS JOIN params
+    FROM all_transfers CROSS JOIN params_with_apr params
     WHERE block_number >= params.from_block
       AND event_ts     <= params.to_block_ts
       AND to_addr      != params.zero_addr
@@ -117,10 +153,10 @@ in_period_deltas AS (
         block_number,
         log_index,
         CASE
-            WHEN to_addr = (SELECT zero_addr FROM params) THEN 'withdraw'
+            WHEN to_addr = (SELECT zero_addr FROM params_with_apr) THEN 'withdraw'
             ELSE 'transfer_out'
         END                                                           AS event_type
-    FROM all_transfers CROSS JOIN params
+    FROM all_transfers CROSS JOIN params_with_apr params
     WHERE block_number >= params.from_block
       AND event_ts     <= params.to_block_ts
       AND from_addr    != params.zero_addr
@@ -135,7 +171,7 @@ timeline AS (
         -1                                                            AS log_index,
         pb.balance_shares                                             AS delta_shares,
         'period_start'                                                AS event_type
-    FROM pre_balances pb CROSS JOIN params p
+    FROM pre_balances pb CROSS JOIN params_with_apr p
 
     UNION ALL
 
@@ -194,7 +230,7 @@ segments AS (
             * (COALESCE(r.next_event_ts, p.to_block_ts) - r.event_ts)
             / p.seconds_per_year                                      AS segment_reward_usds
     FROM running r
-    CROSS JOIN params p
+    CROSS JOIN params_with_apr p
     WHERE r.balance_after > 0
       AND COALESCE(r.next_event_ts, p.to_block_ts) > r.event_ts
       AND r.address != p.dead_addr
@@ -225,7 +261,7 @@ SELECT
     COALESCE(st.deposit_count,  0)                                    AS deposit_count,
     COALESCE(st.withdraw_count, 0)                                    AS withdraw_count
 FROM segments s
-CROSS JOIN params p
+CROSS JOIN params_with_apr p
 LEFT JOIN pre_balances pb ON pb.address = s.address
 LEFT JOIN final_balances fb ON fb.address = s.address
 LEFT JOIN addr_stats     st ON st.address = s.address

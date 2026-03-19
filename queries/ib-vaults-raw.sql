@@ -13,6 +13,7 @@
 -- TODO - not yet tracked:
 --   AAVE USDS (not Morpho)
 --     0xdc035d45d973e3ec169d2276ddab16f1e407384f
+--     NOTE: s/b 0x32a6268f9Ba3642Dda7892aDd74f1D34469A4259
 --   stUSDS/USDS Pool (not Morpho)
 --     0x2c7c98a3b1582d83c43987202aeff638312478ae
 
