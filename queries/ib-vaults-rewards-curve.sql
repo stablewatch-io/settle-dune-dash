@@ -353,6 +353,9 @@ SELECT
     s.address                                                         AS depositor,
     SUM(s.segment_reward_usds)                                        AS reward_usds,
     CAST(SUM(s.segment_reward_usds) * 1e18 AS DECIMAL(38, 0))         AS reward_wei,
+    SUM(SUM(s.segment_reward_usds)) OVER ()                          AS total_rewards_usds,
+    SUM(SUM(CASE WHEN s.address = '0x36c2abab95f9aacd4b05d65b89890e29d6382611' 
+                     THEN s.segment_reward_usds ELSE 0 END)) OVER ()  AS total_rewards_usds_gauge,
     COALESCE(pb.balance_shares, 0)                                    AS initial_balance_lp,
     fb.final_balance_shares                                           AS final_balance_lp,
     fb.final_balance_shares / 1e18 * er.coins0_per_lp                 AS final_balance_usds,
