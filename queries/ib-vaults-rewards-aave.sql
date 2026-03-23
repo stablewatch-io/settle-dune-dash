@@ -238,6 +238,8 @@ SELECT
     s.address                                                         AS depositor,
     SUM(s.segment_reward_usds)                                        AS reward_usds,
     CAST(SUM(s.segment_reward_usds) * 1e18 AS DECIMAL(38, 0))         AS reward_wei,
+    SUM(SUM(CASE WHEN s.address != '0x0000000000000000000000000000000000000000'
+                     THEN s.segment_reward_usds ELSE 0 END)) OVER ()  AS total_rewards_usds_exclude_null,
     COALESCE(pb.balance_shares, 0)                                    AS initial_balance_shares,
     fb.final_balance_shares,
     fb.final_balance_shares / 1e18                                    AS final_balance_usds,
