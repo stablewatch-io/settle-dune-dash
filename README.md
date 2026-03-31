@@ -1,16 +1,23 @@
 # IB Vaults Analytics
 
-Analytics workspace for Morpho v2 IB Vaults on Ethereum. Tracks vault share prices, SSR rates, and calculates time-weighted USDS rewards for depositors.
+Analytics workspace for IB Vaults on Ethereum. Tracks the Sky Savings Rate and calculates time-weighted USDS rewards at the vault level for Morpho, AAVE, and Curve vaults.
+
+See [rewards-methodology.md](rewards-methodology.md) for a full description of how rewards are calculated for each vault type.
 
 ## Tracked Vaults
 
-**Morpho:**
+**Morpho v2:**
 - **Morpho USDS Risk Capital** (Skybase IB): `0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4`
 - **Morpho USDS Flagship** (Skybase IB): `0xe15fcc81118895b67b6647bbd393182df44e11e0`
-- **USDS Vault** (Spark, Morpho v1): `0xe41a0583334f0dc4e023acd0bfef3667f6fe0597`
+
+**Morpho v1:**
+- **USDS Vault** (Spark): `0xe41a0583334f0dc4e023acd0bfef3667f6fe0597`
 
 **AAVE:**
-- **AAVE USDS aToken**: `0x32a6268f9ba3642dda7892add74f1d34469a4259`
+- **USDS aToken contract**: `0x32a6268f9ba3642dda7892add74f1d34469a4259`
+
+**Curve:**
+- **stUSDS/USDS pool contract**: `0x2c7c98a3b1582d83c43987202aeff638312478ae`
 
 ## Setup
 
@@ -21,122 +28,121 @@ npm install
 
 2. Create `.env` file:
 ```bash
-ETHEREUM_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 DUNE_API_KEY=your_dune_api_key
 DUNE_USERNAME=your_dune_username
 ```
 
-## Data Pipeline
-
-### 1. Fetch Share Prices (Required)
-
-Share price data **cannot** be queried directly from Dune's indexed data because `totalAssets()` and `totalSupply()` require reading vault state at specific block heights. Instead, we fetch this data via RPC calls and upload it to Dune.
-
-**Run the fetch script:**
-```bash
-npm run fetch-share-prices
-```
-
-**What it does:**
-- Queries Ethereum archive node for hourly `totalAssets` and `totalSupply` from Morpho v2 vaults
-- Calculates share price = totalAssets / totalSupply at each hour
-- Saves results to `data/share-prices.csv`
-- Starts from March 1, 2026 UTC
-
-**Output:** `data/share-prices.csv` with columns:
-```
-vault_address,hour,block_number,total_assets,total_supply,share_price
-```
-
-### 2. Upload to Dune
-
-```bash
-npm run upload-to-dune
-```
-
-**What it does:**
-- Creates table `dune.{your_username}.ib_vaults_share_prices` (if not exists)
-- Clears existing data
-- Uploads `data/share-prices.csv`
-
-**Important:** Update the Dune username in `ib-vaults-share-price.sql` (line 38) to match your `DUNE_USERNAME`:
-```sql
-FROM dune.your_username.ib_vaults_share_prices
-```
-
 ## Dune Queries
 
-### Core Data Queries
+All reward queries are fully self-contained and derive their inputs entirely from on-chain data. No off-chain data pipeline is required.
 
-**`ib-vaults-raw.sql`** (Query ID: 6852397)
-- Extracts all ERC20 Transfer events from all tracked vaults (Morpho + AAVE)
-- Classifies as: `deposit` (mint from zero), `withdraw` (burn to zero), or `transfer`
-- Shared data source for both rewards queries
+### Supporting Queries
 
 **`ib-vaults-ssr.sql`** (Query ID: 6853959)
 - Historical SSR (Sky Savings Rate) from SPBEAM contract
 - Reads `Set(bytes32 indexed id, uint256 bps)` events where id = "SSR"
-- Used by rewards calculation to determine APR
+- Used by all rewards queries to determine the APR for a given period
 
-**`ib-vaults-share-price.sql`** (Query ID: 6852700)
-- Queries the uploaded custom table
-- Requires running `fetch-share-prices` + `upload-to-dune` first
-- Used by rewards calculation
+### Rewards Queries
 
-### Rewards Calculations
+**`ib-vaults-rewards-morpho-v2.sql`** (Query ID: 6904585)
+- Vault-level time-weighted USDS rewards for Morpho v2 vaults
+- Balance = total idle USDS (vault + adapter cash balance + pro-rata unborrowed in Morpho Blue markets)
+- Markets are discovered dynamically from on-chain supply events
+- Parameters: `{{vault_address}}`, `{{from_timestamp}}`, `{{to_timestamp}}`
 
-**`ib-vaults-rewards-morpho.sql`** (Query ID: 6852356)
-- Time-weighted USDS rewards per depositor for Morpho vaults
-- Formula: `(balance_shares / 1e18) × avg_share_price × idle_factor × apr × segment_seconds / seconds_per_year`
-- Requires `fetch-share-prices` + `upload-to-dune` to be run first
+**`ib-vaults-rewards-morpho-v1.sql`** (Query ID: 6925830)
+- Vault-level time-weighted USDS rewards for Morpho v1 vaults
+- Same methodology as v2; the vault itself supplies directly to Morpho Blue (no adapter)
 - Parameters: `{{vault_address}}`, `{{from_timestamp}}`, `{{to_timestamp}}`
 
 **`ib-vaults-rewards-aave.sql`** (Query ID: 6860002)
-- Time-weighted USDS rewards per depositor for the AAVE USDS vault
-- Formula: `(balance_atokens / 1e18) × apr × segment_seconds / seconds_per_year`
-- No share price needed (1 aToken = 1 USDS); no idle_factor
+- Vault-level time-weighted USDS rewards for the AAVE USDS vault
+- Balance = USDS held by the aToken contract, tracked via USDS Transfer events
+- Parameters: `{{from_timestamp}}`, `{{to_timestamp}}`
+
+**`ib-vaults-rewards-curve.sql`** (Query ID: 6864537)
+- Vault-level time-weighted USDS rewards for the Curve stUSDS/USDS pool
+- Balance = USDS held by the pool contract, tracked via USDS Transfer events
 - Parameters: `{{from_timestamp}}`, `{{to_timestamp}}`
 
 **Dependencies:**
 ```
-                                ib-vaults-share-price (6852700) ─┐
-                                                                  │
-ib-vaults-raw (6852397) ──────> ib-vaults-rewards-morpho (6852356) <─ ib-vaults-ssr (6853959)
-
-ib-vaults-raw (6852397) ──────> ib-vaults-rewards-aave (6860002)   <─ ib-vaults-ssr (6853959)
+ib-vaults-rewards-morpho-v2 (6904585) <─ ib-vaults-ssr (6853959)
+ib-vaults-rewards-morpho-v1 (6925830) <─ ib-vaults-ssr (6853959)
+ib-vaults-rewards-aave      (6860002) <─ ib-vaults-ssr (6853959)
+ib-vaults-rewards-curve     (6864537) <─ ib-vaults-ssr (6853959)
 ```
 
 ## Project Structure
 
 ```
-├── queries/                              # Dune SQL queries
-│   ├── ib-vaults-raw.sql                # Transfer events, Morpho + AAVE (Query: 6852397)
-│   ├── ib-vaults-ssr.sql                # SSR history from SPBEAM (Query: 6853959)
-│   ├── ib-vaults-share-price.sql        # Hourly share prices, Morpho only (Query: 6852700)
-│   ├── ib-vaults-rewards-morpho.sql     # Morpho rewards calc (Query: 6852356)
-│   └── ib-vaults-rewards-aave.sql       # AAVE rewards calc (Query: 6860002)
-├── src/
-│   ├── scripts/
-│   │   ├── fetch-share-prices.ts # Fetch share prices via RPC
-│   │   └── upload-to-dune.ts     # Upload CSV to Dune table
-│   ├── abis/
-│   │   └── morpho-vault-v2.json  # Morpho v2 vault ABI
-│   └── lib/                       # Utility libraries
-├── data/
-│   └── share-prices.csv          # Generated by fetch script
-└── .env                           # API keys (not committed)
+├── queries/                                   # Dune SQL queries
+│   ├── ib-vaults-ssr.sql                      # SSR history from SPBEAM (Query: 6853959)
+│   ├── ib-vaults-rewards-morpho-v2.sql        # Morpho v2 rewards (Query: 6904585)
+│   ├── ib-vaults-rewards-morpho-v1.sql        # Morpho v1 rewards (Query: 6925830)
+│   ├── ib-vaults-rewards-aave.sql             # AAVE rewards (Query: 6860002)
+│   └── ib-vaults-rewards-curve.sql            # Curve rewards (Query: 6864537)
+├── rewards-methodology.md                     # Reward calculation methodology
+└── .env                                       # API keys (not committed)
 ```
+
+## Adding New Vaults
+
+### Morpho v2 — two changes required
+
+The v2 query uses a `{{vault_address}}` parameter but also needs to resolve each vault to its corresponding adapter contract. This mapping is hardcoded in the `params` CTE as a `CASE` expression (lines 34–39 of `ib-vaults-rewards-morpho-v2.sql`):
+
+```sql
+CASE {{vault_address}}
+    WHEN 0xe15fcc81118895b67b6647bbd393182df44e11e0   -- Flagship
+    THEN 0xf94be39e8863183ff41194b5923627c90a34039d   -- its adapter
+    WHEN 0xf42bca228d9bd3e2f8ee65fec3d21de1063882d4   -- Risk Capital
+    THEN 0xaaf8bf4b6e8ccb74b7f5e96d4a27ff967c1eef74   -- its adapter
+END AS adapter
+```
+
+To add a new Morpho v2 vault:
+1. Add a new `WHEN <vault_address> THEN <adapter_address>` row to this `CASE` block in the SQL file.
+2. Add the new vault address to the `{{vault_address}}` parameter enum on Dune.
+
+### Morpho v1 — Dune parameter only
+
+The v1 query contains no hardcoded vault addresses. The vault itself is the Morpho Blue supplier, so no adapter mapping is needed, and markets are discovered dynamically from on-chain supply events. The SQL requires no changes.
+
+To add a new Morpho v1 vault, only add the new vault address to the `{{vault_address}}` parameter enum on Dune.
+
+### AAVE — SQL edit required
+
+The AAVE query is fixed to a single vault. Both the aToken contract address and the USDS token address are hardcoded literals in the `params` CTE (`ib-vaults-rewards-aave.sql`, lines 29–30):
+
+```sql
+0x32a6268f9ba3642dda7892add74f1d34469a4259   AS vault,   -- aToken contract
+0xdc035d45d973e3ec169d2276ddab16f1e407384f   AS usds,    -- USDS token
+```
+
+To support a different AAVE vault, update these two addresses directly in the SQL. If multiple AAVE vaults need to run simultaneously, the query would need to be restructured to accept a `{{vault_address}}` parameter.
+
+### Curve — SQL edit required
+
+The Curve query is fixed to a single pool. Both the pool contract address and the USDS token address are hardcoded literals in the `params` CTE (`ib-vaults-rewards-curve.sql`, lines 34–35):
+
+```sql
+0x2c7c98a3b1582d83c43987202aeff638312478ae   AS vault,   -- pool contract
+0xdc035d45d973e3ec169d2276ddab16f1e407384f   AS coins0,  -- USDS token
+```
+
+To support a different Curve pool, update these two addresses directly in the SQL. Note that `coins0` must be the address of the USDS token in the target pool.
+
+---
 
 ## Usage
 
-1. **Refresh share price data** (run weekly or before reward calculations):
-   ```bash
-   npm run fetch-share-prices
-   npm run upload-to-dune
-   ```
+**Run a rewards query on Dune:** Visit [dune.com](https://dune.com) and execute the relevant query by ID, or use the Dune MCP via Cursor AI. All queries require `{{from_timestamp}}` and `{{to_timestamp}}`; Morpho queries also require `{{vault_address}}`.
 
-2. **Run queries on Dune**: Visit [dune.com](https://dune.com) and execute queries by ID, or use the Dune MCP via Cursor AI
-
-3. **Calculate Morpho rewards**: Run `ib-vaults-rewards-morpho.sql` (Query: 6852356) with `{{vault_address}}`, `{{from_timestamp}}`, `{{to_timestamp}}`
-
-4. **Calculate AAVE rewards**: Run `ib-vaults-rewards-aave.sql` (Query: 6860002) with `{{from_timestamp}}`, `{{to_timestamp}}` — no share price step needed
+| Vault | Query ID | Parameters |
+|-------|----------|------------|
+| Morpho v2 (Flagship / Risk Capital) | 6904585 | vault_address, from_timestamp, to_timestamp |
+| Morpho v1 (USDS Vault) | 6925830 | vault_address, from_timestamp, to_timestamp |
+| AAVE USDS | 6860002 | from_timestamp, to_timestamp |
+| Curve stUSDS/USDS | 6864537 | from_timestamp, to_timestamp |
