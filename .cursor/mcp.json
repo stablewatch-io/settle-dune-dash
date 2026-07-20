@@ -4,7 +4,7 @@
       "type": "streamableHttp",
       "url": "https://api.dune.com/mcp/v1",
       "headers": {
-        "x-dune-api-key": "IgTyRTwGk9VmW0LIiP1jE02gZUB5D5Ck"
+        "x-dune-api-key": "${DUNE_API_KEY}"
       }
     }
   }
