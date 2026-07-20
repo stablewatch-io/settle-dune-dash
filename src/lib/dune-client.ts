@@ -3,7 +3,8 @@ export class DuneClient {
   private baseUrl: string;
 
   constructor(apiKey?: string) {
-    this.apiKey = apiKey || 'IgTyRTwGk9VmW0LIiP1jE02gZUB5D5Ck';
+    this.apiKey = apiKey || process.env.DUNE_API_KEY || '';
+    if (!this.apiKey) throw new Error('DUNE_API_KEY not set');
     this.baseUrl = 'https://api.dune.com/api/v1';
   }
 
